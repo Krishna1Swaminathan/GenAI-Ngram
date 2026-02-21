@@ -1,0 +1,200 @@
+/*
+ * Copyright (C) 2008 The Guava Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package com.google.common.io;
+
+import static com.google.common.base.StandardSystemProperty.OS_NAME;
+import static com.google.common.primitives.Bytes.concat;
+import static com.google.common.truth.Truth.assertThat;
+import static java.lang.Math.min;
+import static java.nio.file.attribute.PosixFilePermission.OWNER_READ;
+import static java.nio.file.attribute.PosixFilePermission.OWNER_WRITE;
+import static org.junit.Assert.assertThrows;
+
+import java.io.File;
+import java.io.IOException;
+import java.io.OutputStream;
+import java.nio.file.attribute.PosixFileAttributeView;
+import java.nio.file.attribute.PosixFileAttributes;
+import org.jspecify.annotations.NullUnmarked;
+
+/**
+ * Unit tests for {@link FileBackedOutputStream}.
+ *
+ * <p>For a tiny bit more testing, see {@link FileBackedOutputStreamAndroidIncompatibleTest}.
+ *
+ * @author Chris Nokleberg
+ */
+@NullUnmarked
+public class FileBackedOutputStreamTest extends IoTestCase {
+
+
+  public void testThreshold() throws Exception {
+    testThreshold(0, 100, true, false);
+    testThreshold(10, 100, true, false);
+    testThreshold(100, 100, true, false);
+    testThreshold(1000, 100, true, false);
+    testThreshold(0, 100, false, false);
+    testThreshold(10, 100, false, false);
+    testThreshold(100, 100, false, false);
+    testThreshold(1000, 100, false, false);
+  }
+
+  private void testThreshold(
+      int fileThreshold, int dataSize, boolean singleByte, boolean resetOnFinalize)
+      throws IOException {
+    byte[] data = newPreFilledByteArray(dataSize);
+    FileBackedOutputStream out = new FileBackedOutputStream(fileThreshold, resetOnFinalize);
+    ByteSource source = out.asByteSource();
+    int chunk1 = min(dataSize, fileThreshold);
+    int chunk2 = dataSize - chunk1;
+
+    // Write just enough to not trip the threshold
+    if (chunk1 > 0) {
+      write(out, data, 0, chunk1, singleByte);
+      assertTrue(ByteSource.wrap(data).slice(0, chunk1).contentEquals(source));
+    }
+    File file = out.getFile();
+    assertThat(file).isNull();
+
+    // Write data to go over the threshold
+    if (chunk2 > 0) {
+      write(out, data, chunk1, chunk2, singleByte);
+      file = out.getFile();
+      assertEquals(dataSize, file.length());
+      assertTrue(file.exists());
+      assertThat(file.getName()).contains("FileBackedOutputStream");
+      if (!isAndroid() && !isWindows()) {
+        PosixFileAttributes attributes =
+            java.nio.file.Files.getFileAttributeView(file.toPath(), PosixFileAttributeView.class)
+                .readAttributes();
+        assertThat(attributes.permissions()).containsExactly(OWNER_READ, OWNER_WRITE);
+      }
+    }
+    out.close();
+
+    // Check that source returns the right data
+    assertThat(source.read()).isEqualTo(data);
+
+    // Make sure that reset deleted the file
+    out.reset();
+    if (file != null) {
+      assertFalse(file.exists());
+    }
+  }
+
+
+  public void testThreshold_resetOnFinalize() throws Exception {
+    testThreshold(0, 100, true, true);
+    testThreshold(10, 100, true, true);
+    testThreshold(100, 100, true, true);
+    testThreshold(1000, 100, true, true);
+    testThreshold(0, 100, false, true);
+    testThreshold(10, 100, false, true);
+    testThreshold(100, 100, false, true);
+    testThreshold(1000, 100, false, true);
+  }
+
+  static void write(OutputStream out, byte[] b, int off, int len, boolean singleByte)
+      throws IOException {
+    if (singleByte) {
+      for (int i = off; i < off + len; i++) {
+        out.write(b[i]);
+      }
+    } else {
+      out.write(b, off, len);
+    }
+    out.flush(); // for coverage
+  }
+
+  // TODO(chrisn): only works if we ensure we have crossed file threshold
+
+  public void testWriteErrorAfterClose() throws Exception {
+    byte[] data = newPreFilledByteArray(100);
+    FileBackedOutputStream out = new FileBackedOutputStream(50);
+    ByteSource source = out.asByteSource();
+
+    out.write(data);
+    assertThat(source.read()).isEqualTo(data);
+
+    out.close();
+    assertThrows(IOException.class, () -> out.write(42));
+
+    // Verify that write had no effect
+    assertThat(source.read()).isEqualTo(data);
+    out.reset();
+  }
+
+  public void testReset() throws Exception {
+    byte[] data = newPreFilledByteArray(100);
+    FileBackedOutputStream out = new FileBackedOutputStream(Integer.MAX_VALUE);
+    ByteSource source = out.asByteSource();
+
+    out.write(data);
+    assertThat(source.read()).isEqualTo(data);
+
+    out.reset();
+    assertThat(source.read()).isEmpty();
+
+    out.write(data);
+    assertThat(source.read()).isEqualTo(data);
+
+    out.close();
+  }
+
+  private static boolean isAndroid() {
+    return System.getProperty("java.runtime.name", "").contains("Android");
+  }
+
+  private static boolean isWindows() {
+    return OS_NAME.value().startsWith("Windows");
+  }
+
+  /**
+   * Test that verifies the resource leak fix for <a
+   * href="https://github.com/google/guava/issues/5756">Issue #5756</a>.
+   *
+   * <p>This test covers a scenario where we write a smaller amount of data first, then write a
+   * large amount that crosses the threshold (transitioning from "not at threshold" to "over the
+   * threshold"). (We then write some more afterward.) This differs from the existing
+   * testThreshold() which writes exactly enough bytes to fill the buffer, then immediately writes
+   * more bytes.
+   *
+   * <p>Note: Direct testing of the {@link IOException} scenario during write/flush is challenging
+   * without mocking. This test verifies that normal operation with threshold crossing still works
+   * correctly with the fix in place.
+   */
+  public void testThresholdCrossing_resourceManagement() throws Exception {
+    FileBackedOutputStream out = new FileBackedOutputStream(/* fileThreshold= */ 10);
+    ByteSource source = out.asByteSource();
+
+    byte[] chunk1 = newPreFilledByteArray(8); // Below threshold
+    byte[] chunk2 = newPreFilledByteArray(5); // Crosses threshold
+    byte[] chunk3 = newPreFilledByteArray(20); // More data to file
+
+    out.write(chunk1);
+    assertThat(out.getFile()).isNull();
+
+    out.write(chunk2);
+    assertThat(out.getFile()).isNotNull();
+    assertThat(source.read()).isEqualTo(concat(chunk1, chunk2));
+
+    out.write(chunk3);
+    assertThat(source.read()).isEqualTo(concat(chunk1, chunk2, chunk3));
+
+    out.reset();
+  }
+}

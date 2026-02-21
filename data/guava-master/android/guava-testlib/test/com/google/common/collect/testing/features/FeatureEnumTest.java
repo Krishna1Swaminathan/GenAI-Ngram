@@ -1,0 +1,119 @@
+/*
+ * Copyright (C) 2008 The Guava Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package com.google.common.collect.testing.features;
+
+import static com.google.common.truth.Truth.assertWithMessage;
+
+import com.google.errorprone.annotations.FormatMethod;
+import java.lang.annotation.Annotation;
+import java.lang.annotation.Inherited;
+import java.lang.annotation.Retention;
+import java.lang.annotation.RetentionPolicy;
+import java.lang.reflect.Method;
+import java.util.Locale;
+import junit.framework.TestCase;
+
+/**
+ * Since annotations have some reusability issues that force copy and paste all over the place, it's
+ * worth having a test to ensure that all our Feature enums have their annotations correctly set up.
+ *
+ * @author George van den Driessche
+ */
+public class FeatureEnumTest extends TestCase {
+  private static void assertGoodTesterAnnotation(Class<? extends Annotation> annotationClass) {
+    assertWithMessage(
+            rootLocaleFormat("%s must be annotated with @TesterAnnotation.", annotationClass))
+        .that(annotationClass.getAnnotation(TesterAnnotation.class))
+        .isNotNull();
+    Retention retentionPolicy = annotationClass.getAnnotation(Retention.class);
+    assertWithMessage(rootLocaleFormat("%s must have a @Retention annotation.", annotationClass))
+        .that(retentionPolicy)
+        .isNotNull();
+    assertEquals(
+        rootLocaleFormat("%s must have RUNTIME RetentionPolicy.", annotationClass),
+        RetentionPolicy.RUNTIME,
+        retentionPolicy.value());
+    assertWithMessage(rootLocaleFormat("%s must be inherited.", annotationClass))
+        .that(annotationClass.getAnnotation(Inherited.class))
+        .isNotNull();
+
+    for (String propertyName : new String[] {"value", "absent"}) {
+      Method method = null;
+      try {
+        method = annotationClass.getMethod(propertyName);
+      } catch (NoSuchMethodException e) {
+        throw new AssertionError("Annotation is missing required method", e);
+      }
+      Class<?> returnType = method.getReturnType();
+      assertTrue(
+          rootLocaleFormat("%s.%s() must return an array.", annotationClass, propertyName),
+          returnType.isArray());
+      assertWithMessage(
+              rootLocaleFormat(
+                  "%s.%s() must return an array of %s.",
+                  annotationClass, propertyName, annotationClass.getDeclaringClass()))
+          .that(returnType.getComponentType())
+          .isEqualTo(annotationClass.getDeclaringClass());
+    }
+  }
+
+  // This is public so that tests for Feature enums we haven't yet imagined
+  // can reuse it.
+  public static <E extends Enum<?> & Feature<?>> void assertGoodFeatureEnum(
+      Class<E> featureEnumClass) {
+    Class<?>[] classes = featureEnumClass.getDeclaredClasses();
+    for (Class<?> containedClass : classes) {
+      if (containedClass.getSimpleName().equals("Require")) {
+        if (containedClass.isAnnotation()) {
+          assertGoodTesterAnnotation(asAnnotation(containedClass));
+        } else {
+          fail(
+              rootLocaleFormat(
+                  "Feature enum %s contains a class named "
+                      + "'Require' but it is not an annotation.",
+                  featureEnumClass));
+        }
+        return;
+      }
+    }
+    fail(
+        rootLocaleFormat(
+            "Feature enum %s should contain an annotation named 'Require'.", featureEnumClass));
+  }
+
+  @SuppressWarnings("unchecked")
+  private static Class<? extends Annotation> asAnnotation(Class<?> clazz) {
+    if (clazz.isAnnotation()) {
+      return (Class<? extends Annotation>) clazz;
+    } else {
+      throw new IllegalArgumentException(rootLocaleFormat("%s is not an annotation.", clazz));
+    }
+  }
+
+  public void testFeatureEnums() throws Exception {
+    assertGoodFeatureEnum(CollectionFeature.class);
+    assertGoodFeatureEnum(ListFeature.class);
+    assertGoodFeatureEnum(SetFeature.class);
+    assertGoodFeatureEnum(CollectionSize.class);
+    assertGoodFeatureEnum(MapFeature.class);
+  }
+
+  @FormatMethod
+  private static String rootLocaleFormat(String format, Object... args) {
+    return String.format(Locale.ROOT, format, args);
+  }
+}
